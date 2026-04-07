@@ -13,7 +13,10 @@ MAIN_RETRACT = 5
 PAUSE = 6
 FULL_ROUTINE = 7
 
-t = serial.Serial("/dev/ttyUSB0", 2000000)
+START_SIGNAL = 123456789
+END_SIGNAL = 987654321
+
+t = serial.Serial("/dev/ttyUSB0", 2000000, timeout=0.05)
 
 print(t.portstr)
 
@@ -60,7 +63,7 @@ def can_send(t,signal):
     signal_b = signal.to_bytes(4,'little')
     send_can_id_data = bytes([
         0xaa,     # 0  Packet header
-        0xe8,     # 1  0xc0 Tyep
+        0xc8,     # 1  0xc0 Tyep
         # bit5(frame type 0- standard frame (frame ID 2 bytes), 1-extended frame (frame ID 4 bytes))
         # bit4(frame format 0- data frame, 1 remote frame)
         # Bit0~3 Frame data length (0~8)
@@ -78,67 +81,83 @@ def can_send(t,signal):
         0x00,     # 13 Frame data 8       CAN sends  data 8
         0x55,     # 14 This guy needs to be 0x55
     ])
+
+    send_can_id_data = bytes([
+        0xaa,
+        0xc8,       # standard data frame, DLC=8
+        0x12,       # standard ID low byte
+        0x34,       # standard ID high byte
+        signal_b[0],
+        signal_b[1],
+        signal_b[2],
+        signal_b[3],
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x55,
+    ])
     result = t.write(send_can_id_data)
     time.sleep(0.001)
 
+def dump_serial_bytes(t, max_bytes=64):
+    n = t.in_waiting
+    if n <= 0:
+        return None
+    data = t.read(min(n, max_bytes))
+    return " ".join(f"{b:02X}" for b in data)
+
 def can_read(t):
     data = t.read(2)
-    hex_data1 = [hex(byte) for byte in data]
-    if (data[0] == 0xaa) and (data[1] & 0xc0 == 0xc0):  # frame header
+    if len(data) < 2:
+        return None
+
+    if (data[0] == 0xaa) and (data[1] & 0xc0 == 0xc0):
         length = data[1] & 0x0f
-        if data[1] & 0x10 == 0x00:
-            strFrameFormat = "Data Frame"
-        else:
-            strFrameFormat = "Remote Frame"
 
         if data[1] & 0x20 == 0x00:
-            strFrameType = "Standard Frame"
+            # standard frame
             len2 = length + 3
+            data2 = t.read(len2)
+            if len(data2) < len2:
+                return None
+
+            if data2[-1] != 0x55:
+                return None
+
+            can_data = list(data2[2:2 + length])
         else:
-            strFrameType = "Extended Frame"
             len2 = length + 5
+            data2 = t.read(len2)
+            if len(data2) < len2:
+                return None
 
-        data2 = t.read(len2)
-        hex_data = [hex(byte) for byte in data2]
-        hex_data1 += hex_data
+            if data2[-1] != 0x55:
+                return None
 
-        if data2[len2 - 1] == 0x55:  # end code
-            if strFrameType == "Standard Frame":
-                id = data2[1]
-                id <<= 8
-                id += data2[0]
-                strId = hex(id)
+            can_data = list(data2[4:4 + length])
 
-                if length > 0:
-                    CanData = hex_data[2:2 + length]
-                else:
-                    CanData = ["No Data"]
-            else:
-                id = data2[3]
-                id <<= 8
-                id += data2[2]
-                id <<= 8
-                id += data2[1]
-                id <<= 8
-                id += data2[0]
-                strId = hex(id)
-                if length > 0:
-                    CanData = hex_data[4:4 + length]
-                else:
-                    CanData = ["No Data"]
+        if len(can_data) >= 8:
+            x1 = int.from_bytes(can_data[0:4], byteorder='little', signed=True)
+            x2 = int.from_bytes(can_data[4:8], byteorder='little', signed=True)
+            return (x1, x2)
 
-            canDataNumeric = [int(x,16) for x in CanData]
-            #print(f"Can data numeric: {canDataNumeric}")
-            x1 = int.from_bytes(canDataNumeric[0:4],byteorder='little')
-            x2 = int.from_bytes(canDataNumeric[4:8],byteorder='little')
-            print(f"x1, x2: {x1}, {x2}")
-
-
+    return None
 
 
 def main(stdscr):
+    curses.curs_set(0)
+    stdscr.nodelay(True)
+
+    received_data = []
+    receiving = False
+
     stdscr.clear()
     stdscr.addstr("Press keys (q to quit)...\n")
+    can_setup(t)
+
+    last_raw = "No data yet"
+    last_status = "Press 0-7, q to quit"
 
     while True:
         key = stdscr.getch()
@@ -154,147 +173,52 @@ def main(stdscr):
         elif key == ord('4'):
             signal = MAIN_EXTEND
         elif key == ord('5'):
-            signal - MAIN_RETRACT
+            signal = MAIN_RETRACT
         elif key == ord('6'):
             signal = PAUSE
         elif key == ord('7'):
             signal = FULL_ROUTINE
         
         if signal > -1:
-            print(f"Sent signal {signal}")
+            last_status = f"Sent signal {signal}"
             can_send(t,signal)
+        
+        raw = dump_serial_bytes(t)
+        if raw:
+            last_raw = raw
+
+        stdscr.erase()
+        stdscr.addstr(0, 0, last_status)
+        stdscr.addstr(2, 0, f"in_waiting: {t.in_waiting}")
+        stdscr.addstr(4, 0, "raw bytes received:")
+        stdscr.addstr(5, 0, last_raw[:120])
         stdscr.refresh()
-        can_read() # change to actually log data somewhere
+
+        time.sleep(0.02)
+
+        # result = can_read(t)
+
+        # if result:
+        #     x1, x2 = result
+
+        #     if x1 == START_SIGNAL:
+        #         receiving = True
+        #         received_data = []
+        #     elif x1 == END_SIGNAL:
+        #         receiving = False
+        #     elif receiving:
+        #         received_data.append(x1)
+        #         if x2 != 0:
+        #             received_data.append(x2)
+
+        # # --- display ---
+        # stdscr.clear()
+        # stdscr.addstr(0, 0, "Receiving CAN data:")
+
+        # for i, val in enumerate(received_data[-10:]):  # show last 10
+        #     stdscr.addstr(2 + i, 0, str(val))
+
+        # stdscr.refresh()
+        # time.sleep(0.01)
 
 curses.wrapper(main)
-
-# def main(count):
-#     iterations = 0
-#     total_sent = 0
-#     total_success = 0
-#     while True:
-
-#         # Generate data to send
-#         start = random.randint(0,100)
-#         data_to_send = [x + start for x in range(count*2)]
-#         data_to_send[-1] = 123456789 # use for start command
-#         data_to_send[0] = 987654321
-#         data_list = data_to_send.copy()
-#         data_list.reverse()
-
-#         while len(data_to_send) > 0:
-#             x1 = data_to_send.pop()
-#             x2 = data_to_send.pop()
-
-#             x1_b = x1.to_bytes(4,'little')
-#             x2_b = x2.to_bytes(4,'little')
-
-#             send_can_id_data = bytes([
-#                 0xaa,     # 0  Packet header
-#                 0xe8,     # 1  0xc0 Tyep
-#                 # bit5(frame type 0- standard frame (frame ID 2 bytes), 1-extended frame (frame ID 4 bytes))
-#                 # bit4(frame format 0- data frame, 1 remote frame)
-#                 # Bit0~3 Frame data length (0~8)
-#                 0x67,     # 2  Frame ID data 1    1~8 bit, high bytes at the front, low bytes at the back
-#                 0x45,     # 3  Frame ID data 2    1~8 bit, high bytes at the front, low bytes at the back
-#                 0x23,     # 4  Frame ID data 3    1~8 bit, high bytes at the front, low bytes at the back
-#                 0x01,     # 5  Frame ID data 4    9~16 bit, high bytes at the front, low bytes at the back
-#                 x1_b[0],     # 6  Frame data 1       CAN sends  data 1
-#                 x1_b[1],     # 7  Frame data 2       CAN sends  data 2
-#                 x1_b[2],     # 8  Frame data 3       CAN sends  data 3
-#                 x1_b[3],     # 9  Frame data 4       CAN sends  data 4
-#                 x2_b[0],     # 10 Frame data 5       CAN sends  data 5
-#                 x2_b[1],     # 11 Frame data 6       CAN sends  data 6
-#                 x2_b[2],     # 12 Frame data 7       CAN sends  data 7
-#                 x2_b[3],     # 13 Frame data 8       CAN sends  data 8
-#                 0x55,     # 14 This guy needs to be 0x55
-#             ])
-#             num = t.write(send_can_id_data)
-#             #print(f"Ints: {x1, x2}")
-#             time.sleep(0.001) # data goes bad if we have no sleep
-
-#         received_count = 0
-#         nums_received = []
-#         while received_count < count*2:
-#             data = t.read(2)
-#             hex_data1 = [hex(byte) for byte in data]
-#             if (data[0] == 0xaa) and (data[1] & 0xc0 == 0xc0):  # frame header
-#                 length = data[1] & 0x0f
-#                 if data[1] & 0x10 == 0x00:
-#                     strFrameFormat = "Data Frame"
-#                 else:
-#                     strFrameFormat = "Remote Frame"
-
-#                 if data[1] & 0x20 == 0x00:
-#                     strFrameType = "Standard Frame"
-#                     len2 = length + 3
-#                 else:
-#                     strFrameType = "Extended Frame"
-#                     len2 = length + 5
-
-#                 data2 = t.read(len2)
-#                 hex_data = [hex(byte) for byte in data2]
-#                 hex_data1 += hex_data
-#                 #print(hex_data1)
-#                 if data2[len2 - 1] == 0x55:  # end code
-#                     if strFrameType == "Standard Frame":
-#                         id = data2[1]
-#                         id <<= 8
-#                         id += data2[0]
-#                         strId = hex(id)
-
-#                         if length > 0:
-#                             CanData = hex_data[2:2 + length]
-#                         else:
-#                             CanData = ["No Data"]
-#                     else:
-#                         id = data2[3]
-#                         id <<= 8
-#                         id += data2[2]
-#                         id <<= 8
-#                         id += data2[1]
-#                         id <<= 8
-#                         id += data2[0]
-#                         strId = hex(id)
-#                         if length > 0:
-#                             CanData = hex_data[4:4 + length]
-#                         else:
-#                             CanData = ["No Data"]
-
-#                     canDataNumeric = [int(x,16) for x in CanData]
-#                     #print(f"Can data numeric: {canDataNumeric}")
-#                     x1 = int.from_bytes(canDataNumeric[0:4],byteorder='little')
-#                     x2 = int.from_bytes(canDataNumeric[4:8],byteorder='little')
-#                     received_count = received_count + 2
-#                     nums_received.append(x1)
-#                     nums_received.append(x2)
-#                     #print("Receive CAN id: " + strId + " Data:", end='')
-#                     #print(f" {x1}, {x2}")
-#                     #print(strFrameType + ", " + strFrameFormat)
-#                 else:
-#                     print("Receive Packet header Error")
-            
-#         # Now we've received our data back
-#         print(data_list)
-#         print(nums_received)
-#         if (len(data_list) != len(nums_received)):
-#             print("Wrong number of numbers received")
-#         else:
-#             success_list = [1 for i in range(len(data_list)) if data_list[i] == nums_received[i]]
-#             successes = sum(success_list)
-#             total_success += successes
-#             total_sent += len(data_list)
-#             print(f"Received {successes * 4} bytes correct out of {len(data_list) * 4} bytes for a success rate of {successes / len(data_list)}")
-#             print(f"\nTotal: {total_sent * 4} bytes sent, {100 * total_success / total_sent}% returned successfully. \n")
-        
-#         iterations += 1
-#         time.sleep(1)
-
-#     t.close()
-
-# if __name__ == "__main__":
-#     if len(sys.argv) > 1:
-#         count = sys.argv[1]
-#         main(int(count))
-#     else:
-#         main(16)
