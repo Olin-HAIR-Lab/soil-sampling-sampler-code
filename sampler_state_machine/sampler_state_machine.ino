@@ -14,7 +14,8 @@ const uint8_t SERVO3_PIN = 10;
 const uint8_t CONTINUOUS_PIN = A0;
 const uint8_t BUS_SERVO_PIN = 5;
 const uint8_t SENSOR_PIN = A1; // moisture sensor
-const uint8_t DISTANCE_PIN = A2; // distance sensor
+const uint8_t TRIG_PIN = 3; // trigger the distance sensor
+const uint8_t ECHO_PIN = 4; // read the distance sensor
 
 // Pins for CAN communication
 int CAN0_INT = 2;
@@ -379,9 +380,29 @@ int stateTimedOut(unsigned long time_now) {
   return (time_now >= state_end_ms);
 }
 
+float triggerDistanceSensor() {
+  // Currently pulseIn is a blocking call
+  // If we want this to be more response, we would make it non blocking, 
+  // do a state machine for reading the pin pulse instead
+
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  // Read echo time
+  long duration = pulseIn(ECHO_PIN, HIGH);
+
+  // Convert to distance (cm)
+  float distance = duration / 58.0;
+  return distance;
+}
+
 float getExtensionDistance(unsigned long time_now, int retract) {
   // Read the distance from the distance sensor
   // Use distance at max retraction to calculate how far we've extended
+  int dist_read = analogRead(0);
   return 0.0; //TODO
 }
 
@@ -604,7 +625,7 @@ void loop() {
         if (succeeded) {
           
           // TODO change to no longer be debug
-          int[30] fake_readings = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
+          int fake_readings[30] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
 
           sendIntArrayWithSentinel(fake_readings,reading_count); // send the data back over CAN
           state_end_ms = millis() + WAIT_AFTER_SEND_TIME;
