@@ -31,7 +31,7 @@ const int RETRACTION_TIME_LIMIT = 20 * 1000;
 const int CLAW_EXTENSION_TIME_LIMIT = 2 * 1000;
 const int CLAW_RETRACTION_TIME_LIMIT = 2 * 1000;
 const int SAMPLING_TIME = 2 * 1000;
-const int WAIT_AFTER_SEND_TIME = 500;
+const int WAIT_AFTER_SEND_TIME = 10;
 const int CAN_SEND_DELAY = 10;
 const int SAMPLING_DELAY = 50;
 
@@ -118,7 +118,7 @@ int reading_count = 0; // how many readings have we read
 
 float extension;
 int succeeded;
-int start_delay_ms;
+unsigned long start_delay_ms;
 unsigned long spoof_extend_time; 
 
 ManagedServo servo1;
@@ -582,7 +582,7 @@ void loop() {
           logSensorData(reading_count);
           start_delay_ms = millis(); // record the time so we can delay the next sample
           reading_count++;
-          if (reading_count > 128) {
+          if (reading_count > 127) {
             // We're out of space to store values
             Serial.println("Filled the array of readings");
             state = SAMPLER_RETRACTING;
@@ -602,7 +602,7 @@ void loop() {
         // We still need to undo the claws
         state = SAMPLER_CLAW_RETRACTING;
         Serial.println("Entering SAMPLER_CLAW_RETRACTING state");
-        state_end_ms = millis() + RETRACTION_TIME_LIMIT;
+        state_end_ms = millis() + CLAW_RETRACTION_TIME_LIMIT;
         break;
       }
       if (stateTimedOut(millis())) {
@@ -612,7 +612,7 @@ void loop() {
         // We still need to undo the claws
         state = SAMPLER_CLAW_RETRACTING;
         Serial.println("Entering SAMPLER_CLAW_RETRACTING state");
-        state_end_ms = millis() + RETRACTION_TIME_LIMIT;
+        state_end_ms = millis() + CLAW_RETRACTION_TIME_LIMIT;
       }
       break;
 
@@ -625,12 +625,14 @@ void loop() {
         if (succeeded) {
           
           // TODO change to no longer be debug
-          int fake_readings[30] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
-
-          sendIntArrayWithSentinel(fake_readings,reading_count); // send the data back over CAN
+          //int fake_readings[30] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
+          Serial.print("Starting to send data");
+          sendIntArrayWithSentinel(readings,reading_count); // send the data back over CAN
+          Serial.print("Finished sending data");
           state_end_ms = millis() + WAIT_AFTER_SEND_TIME;
           state = SAMPLER_WAIT_AFTER_SEND;
           Serial.println("Entering SAMPLER_WAIT_AFTER_SEND state");
+          reading_count = 0;
           break;
 
         } else {
