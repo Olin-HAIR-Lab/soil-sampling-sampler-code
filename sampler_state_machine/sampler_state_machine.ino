@@ -11,14 +11,14 @@
 const uint8_t SERVO1_PIN = 8;
 const uint8_t SERVO2_PIN = 9;
 const uint8_t SERVO3_PIN = 10;
-const uint8_t CONTINUOUS_PIN = 11;
+const uint8_t CONTINUOUS_PIN = A0;
 const uint8_t BUS_SERVO_PIN = 5;
-const uint8_t SENSOR_PIN = A0; // moisture sensor
-const uint8_t DISTANCE_PIN = A1; // distance sensor
+const uint8_t SENSOR_PIN = A1; // moisture sensor
+const uint8_t DISTANCE_PIN = A2; // distance sensor
 
 // Pins for CAN communication
 int CAN0_INT = 2;
-MCP_CAN CAN0(10);
+MCP_CAN CAN0(7);
 
 // Movement constants --- how far to require the auger to extend and contract
 const float MINIMUM_EXTENSION_DIST = 80.0; // mm from fully retracted, may need to change units
@@ -34,11 +34,13 @@ const int WAIT_AFTER_SEND_TIME = 500;
 const int CAN_SEND_DELAY = 10;
 const int SAMPLING_DELAY = 50;
 
+const int BLIND_EXTENSION_TIME = 5000;
+
 // Movement controls --- angle of claws, speed of claws (deg/s), speed percent of auger
-const float CLAW_ANGLE_START = 60.0;
+const float CLAW_ANGLE_START = 10.0;
 const float CLAW_ANGLE_END = 90.0;
 const float CLAW_SPEED = 60.0;
-const int AUGER_SPEED_PERCENT = 50;
+const int AUGER_SPEED_PERCENT = 70;
 
 // Sentinel values to send to the Python code running on the drone
 const int32_t START_SIGNAL = 123456789;
@@ -74,8 +76,8 @@ struct ManagedContinuousServo {
 
   int commandPct = 0;  // direction, -100 to 100
   int neutralUs = 1500; // microseconds of neutral (no rotation)
-  int maxForwardUs = 1700; // max rotation speed forwards, in microseconds
-  int maxReverseUs = 1300; // max rotation speed backwards, in microseconds
+  int maxForwardUs = 2000; // max rotation speed forwards, in microseconds
+  int maxReverseUs = 1000; // max rotation speed backwards, in microseconds
 };
 
 enum CANCommand {
@@ -116,6 +118,7 @@ int reading_count = 0; // how many readings have we read
 float extension;
 int succeeded;
 int start_delay_ms;
+unsigned long spoof_extend_time; 
 
 ManagedServo servo1;
 ManagedServo servo2;
@@ -124,7 +127,7 @@ ManagedContinuousServo auger_servo;
 Servo busServo;
 
 void initArmServos() {
-  initManagedServo(servo1, SERVO1_PIN, true,  0.0f, 60.0f);   // inverted
+  initManagedServo(servo1, SERVO1_PIN, false,  0.0f, 60.0f);   // inverted
   initManagedServo(servo2, SERVO2_PIN, false, 0.0f, 60.0f);
   initManagedServo(servo3, SERVO3_PIN, true,  0.0f, 60.0f);   // inverted
 
@@ -149,6 +152,20 @@ void initManagedServo(ManagedServo& s, uint8_t pin, bool inverted, float initial
   s.lastUpdateMs = millis();
   s.enabled = false;
   s.attached = false;
+}
+
+void initContinuousServo(ManagedContinuousServo& s, uint8_t pin, bool inverted) {
+  s.pin = pin;
+  s.inverted = inverted;
+  s.commandPct = 0;
+  s.neutralUs = 1500;
+  s.maxForwardUs = 2000;
+  s.maxReverseUs = 1000;
+
+  s.hw.attach(s.pin);
+  s.attached = true;
+  s.enabled = true;
+  s.hw.writeMicroseconds(s.neutralUs);
 }
 
 void enableServo(ManagedServo& s) {
@@ -227,7 +244,17 @@ void updateContinuousServo(ManagedContinuousServo& s) {
     pulse = s.neutralUs - ((-cmd) * (s.neutralUs - s.maxReverseUs)) / 100;
   }
 
+  //Serial.print("Auger cmd=");
+  //Serial.print(cmd);
+  if (pulse > 1600 || pulse < 1400) {
+    Serial.print("pin: ");
+    Serial.print(s.pin);
+    Serial.print(", pulse=");
+    Serial.println(pulse);
+  }
+  
   s.hw.writeMicroseconds(pulse);
+  delay(10);
 }
 
 void setBusServoNeutral() {
@@ -278,6 +305,7 @@ int logicalToPhysicalWrite(const ManagedServo& s, float logicalAngle) {
 
 void processCANReceived() {
   if(CAN0.checkReceive() == CAN_MSGAVAIL)  {
+    Serial.print("msg received: ");
     if (CAN0.readMsgBuf(&rxId, &len, rxBuf) != CAN_OK) {
       return;
     }
@@ -287,15 +315,17 @@ void processCANReceived() {
     uint32_t canId  = isExtended ? (rxId & 0x1FFFFFFFUL) : rxId;
     
     if (isExtended) { // we aren't expecting extended CAN frames
+      Serial.print(" extended ");
       return;
     }
 
-    if (isRemote) { // we aren't expecting to use remote frames
-      return;
+    if (isRemote) { 
+      Serial.print(" remote ");
     }
 
     if (len < 4) {
       // We don't have a full int of data, so we throw it out
+      Serial.println(" len < 4");
       return;
     }
 
@@ -307,6 +337,22 @@ void processCANReceived() {
     } else {
       processCommand(cmd);
     }
+  }
+}
+
+void processSerialReceived() {
+  if (Serial.available() > 0) {
+    String input = Serial.readStringUntil('\n');
+    input.trim();
+
+    if (input.length() == 0) return;
+
+    int cmd = input.toInt();
+
+    Serial.print("Received serial command: ");
+    Serial.println(cmd);
+
+    processCommand(cmd);
   }
 }
 
@@ -333,10 +379,33 @@ int stateTimedOut(unsigned long time_now) {
   return (time_now >= state_end_ms);
 }
 
-float getExtensionDistance() {
+float getExtensionDistance(unsigned long time_now, int retract) {
   // Read the distance from the distance sensor
   // Use distance at max retraction to calculate how far we've extended
   return 0.0; //TODO
+}
+
+float getExtensionDistanceSpoof(unsigned long time_now, int retract) {
+  // is it time? 
+  int done;
+  if (time_now > spoof_extend_time) {
+    done = 1;
+  } else {
+    done = 0;
+  }
+  if (done) {
+    if (retract) {
+      return MAXIMUM_RETRACTION_DIST - 1.0;
+    } else {
+      return MINIMUM_EXTENSION_DIST + 1.0;
+    }
+  } else {
+    if (retract) {
+      return MAXIMUM_RETRACTION_DIST + 1.0;
+    } else {
+      return MINIMUM_EXTENSION_DIST - 1.0;
+    }
+  }
 }
 
 void logSensorData(int reading_count) {
@@ -386,11 +455,15 @@ void sendFailure() {
 
 void processCommand(int cmd) {
   // Switch statement responding to a command sent over CAN
-
+  Serial.print("cont servo command pct: ");
+  Serial.println(auger_servo.commandPct);
+  Serial.print("auger servo enabled? ");
+  Serial.println(auger_servo.enabled);
   switch(cmd) {
     case START:
       state = SAMPLER_PAUSED;
       Serial.println("Entering SAMPLER_PAUSED state");
+      commandContinuousServo(auger_servo, 0); // speed 0 makes the auger stop moving
       break;
     
     case STOP:
@@ -431,6 +504,7 @@ void processCommand(int cmd) {
 
 void loop() {
   processCANReceived(); // listen for any new instructions
+  //processSerialReceived();
   switch(state) {
     case SAMPLER_OFF:
       // We haven't yet received a start command
@@ -443,6 +517,8 @@ void loop() {
         state = SAMPLER_EXTENDING;
         Serial.println("Entering SAMPLER_EXTENDING state");
         state_end_ms = millis() + EXTENSION_TIME_LIMIT;
+        // Used for setting a minimum extension time, if we don't have the sensor
+        spoof_extend_time = millis() + BLIND_EXTENSION_TIME;
       } else {
         // keep claw servos extending
         setClawTargets(CLAW_ANGLE_END, CLAW_SPEED); // Target angle of extension, deg/s
@@ -450,7 +526,7 @@ void loop() {
       break;
 
     case SAMPLER_EXTENDING:
-      extension = getExtensionDistance(); // how far have we gone down?
+      extension = getExtensionDistanceSpoof(millis(),0); // how far have we gone down?
       commandContinuousServo(auger_servo, AUGER_SPEED_PERCENT);
       if (extension > MINIMUM_EXTENSION_DIST) {
         // we have extended enough
@@ -472,12 +548,14 @@ void loop() {
 
     case SAMPLER_SAMPLING:
       // We're holding position and sampling the soil
+      commandContinuousServo(auger_servo, 0); // speed 0 makes the auger stop moving
       if (stateTimedOut(millis())) {
         // We've sampled for enough time (success)
         state = SAMPLER_RETRACTING;
         Serial.println("Entering SAMPLER_RETRACTING state");
         succeeded = 1;
         state_end_ms = millis() + RETRACTION_TIME_LIMIT;
+        spoof_extend_time = millis() + BLIND_EXTENSION_TIME;
       } else {
         if (millis() > start_delay_ms + SAMPLING_DELAY) {
           logSensorData(reading_count);
@@ -489,13 +567,14 @@ void loop() {
             state = SAMPLER_RETRACTING;
             succeeded = 1;
             state_end_ms = millis() + RETRACTION_TIME_LIMIT;
+            spoof_extend_time = millis() + BLIND_EXTENSION_TIME;
           }
         }
       }
       break;
 
     case SAMPLER_RETRACTING:
-      extension = getExtensionDistance(); // how far have we gone down?
+      extension = getExtensionDistanceSpoof(millis(),1); // how far have we gone down?
       commandContinuousServo(auger_servo, -1*AUGER_SPEED_PERCENT);
       if (extension < MAXIMUM_RETRACTION_DIST) {
         // we have retracted enough
@@ -519,10 +598,15 @@ void loop() {
     case SAMPLER_CLAW_RETRACTING:
       // We move the smaller servos to retract the claws
       setClawTargets(CLAW_ANGLE_START, CLAW_SPEED); // Target angle of retraction, deg/s
+      commandContinuousServo(auger_servo, 0); // speed 0 makes the auger stop moving
       if (stateTimedOut(millis())) {
         // did we succeed? Only send data if so
         if (succeeded) {
-          sendIntArrayWithSentinel(readings,reading_count); // send the data back over CAN
+          
+          // TODO change to no longer be debug
+          int[30] fake_readings = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
+
+          sendIntArrayWithSentinel(fake_readings,reading_count); // send the data back over CAN
           state_end_ms = millis() + WAIT_AFTER_SEND_TIME;
           state = SAMPLER_WAIT_AFTER_SEND;
           Serial.println("Entering SAMPLER_WAIT_AFTER_SEND state");
@@ -571,4 +655,18 @@ void setup()
   CAN0.setMode(MCP_NORMAL);                     // Set operation mode to normal so the MCP2515 sends acks to received data.
 
   pinMode(CAN0_INT, INPUT);                            // Configuring pin for /INT input
+
+  initArmServos();
+  //initContinuousServo(auger_servo, CONTINUOUS_PIN, false);
+
+  // initialize continuous servo too
+  auger_servo.pin = CONTINUOUS_PIN;
+  auger_servo.inverted = true;
+  auger_servo.commandPct = 0;
+  auger_servo.attached = true;
+  auger_servo.enabled = true;
+  auger_servo.hw.attach(auger_servo.pin);
+  auger_servo.hw.writeMicroseconds(auger_servo.neutralUs);
+
+
 }
